@@ -139,6 +139,10 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVTarget() {
   initializeRISCVExpandAtomicPseudoPass(*PR);
   initializeRISCVRedundantCopyEliminationPass(*PR);
   initializeRISCVAsmPrinterPass(*PR);
+  initializeUniformityBeforePhiWrapperPass(*PR);
+  initializeExpandPseudosPass(*PR);
+  initializeRISCVSinkPass(*PR);
+  initializeRISCVRegisterPressurePass(*PR);
 }
 
 static std::string computeDataLayout(const Triple &TT,
@@ -407,6 +411,7 @@ public:
     return getTM<RISCVTargetMachine>();
   }
 
+  void addOptimizedRegAlloc() override;
   void addIRPasses() override;
   bool addPreISel() override;
   void addCodeGenPrepare() override;
@@ -472,6 +477,16 @@ bool RISCVPassConfig::addRegAssignAndRewriteOptimized() {
       EnableRISCVDeadRegisterElimination)
     addPass(createRISCVDeadRegisterDefinitionsPass());
   return TargetPassConfig::addRegAssignAndRewriteOptimized();
+}
+
+void RISCVPassConfig::addOptimizedRegAlloc() {
+  if (getOptimizeRegAlloc())
+    insertPass(&DetectDeadLanesID, &InitUndefID);
+
+  //insertPass(&MachineSchedulerID, &RISCVRegisterPressureID);
+  insertPass(&MachineSchedulerID, &ExpandPseudosID);
+  insertPass(&ExpandPostRAPseudosID, &RISCVSinkID);
+  TargetPassConfig::addOptimizedRegAlloc();
 }
 
 void RISCVPassConfig::addIRPasses() {
@@ -618,6 +633,7 @@ void RISCVPassConfig::addMachineSSAOptimization() {
   if (TM->getTargetTriple().isRISCV64()) {
     addPass(createRISCVOptWInstrsPass());
   }
+  insertPass(&LiveVariablesID, &UniformityBeforePhiWrapperID);
 }
 
 void RISCVPassConfig::addPreRegAlloc() {

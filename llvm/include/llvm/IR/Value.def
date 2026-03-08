@@ -122,6 +122,7 @@ HANDLE_INLINE_ASM_VALUE(InlineAsm)
 HANDLE_MEMORY_VALUE(MemoryUse)
 HANDLE_MEMORY_VALUE(MemoryDef)
 HANDLE_MEMORY_VALUE(MemoryPhi)
+HANDLE_MEMORY_VALUE(MemoryGamma)
 
 HANDLE_INSTRUCTION(Instruction)
 // Enum values starting at InstructionVal are used for Instructions;

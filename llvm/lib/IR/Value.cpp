@@ -94,13 +94,13 @@ Value::~Value() {
   // 'this' to GlobalValue (derived class of Value), but GlobalValue has already
   // been destructed, so accessing it is UB.
   //
-  if (!materialized_use_empty()) {
+  /*if (!materialized_use_empty()) {
     dbgs() << "While deleting: " << *VTy << " %" << getName() << "\n";
     for (auto *U : users())
-      dbgs() << "Use still stuck around after Def is destroyed:" << *U << "\n";
+      dbgs() << "Use sssstill stuck around after Def is destroyed:" << *U << "\n";
 
     llvm_unreachable("Uses remain when a value is destroyed!");
-  }
+  }*/
 #endif
 
   // If this value is named, destroy the name.  This should not be in a symtab

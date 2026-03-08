@@ -283,6 +283,7 @@ RAGreedy::RequiredAnalyses::RequiredAnalyses(Pass &P) {
 }
 
 bool RAGreedyLegacy::runOnMachineFunction(MachineFunction &MF) {
+  LLVM_DEBUG(dbgs()<<"RAGreedyLegacy::runOnMachineFunction\n");
   RAGreedy::RequiredAnalyses Analyses(*this);
   RAGreedy Impl(Analyses, F);
   return Impl.run(MF);
@@ -536,49 +537,76 @@ MCRegister RAGreedy::tryAssign(const LiveInterval &VirtReg,
   for (auto I = Order.begin(), E = Order.end(); I != E && !PhysReg; ++I) {
     assert(*I);
     if (!Matrix->checkInterference(VirtReg, *I)) {
-      if (I.isHint())
+      if (I.isHint()) {
+	LLVM_DEBUG(dbgs()<<"isHint: "<<printReg(*I, TRI)<<"\n");
         return *I;
-      else
+      }
+      else {
+	LLVM_DEBUG(dbgs()<<"PhysReg="<<printReg(*I, TRI)<<"\n");
+	LLVM_DEBUG(dbgs()<<"Order: {");
+	for (auto II = Order.begin(), EE = Order.end(); II != EE; ++II) {
+          LLVM_DEBUG(dbgs()<<printReg(*II, TRI)<<" ");
+	}LLVM_DEBUG(dbgs()<<"}\n");
+	LLVM_DEBUG(dbgs()<<"True Order: {");
+	for (auto III = Order.begin(), EEE = Order.end(); III != EEE; ++III) {
+          if (!Matrix->checkInterference(VirtReg, *III)) LLVM_DEBUG(dbgs()<<printReg(*III, TRI)<<" ");
+	}LLVM_DEBUG(dbgs()<<"}\n");
         PhysReg = *I;
+      }
     }
   }
-  if (!PhysReg.isValid())
+  if (!PhysReg.isValid()) {
+    LLVM_DEBUG(dbgs()<<"PhysReg is not valid.\n");
     return PhysReg;
+  }
 
   // PhysReg is available, but there may be a better choice.
 
   // If we missed a simple hint, try to cheaply evict interference from the
   // preferred register.
-  if (Register Hint = MRI->getSimpleHint(VirtReg.reg()))
+  if (Register Hint = MRI->getSimpleHint(VirtReg.reg())) {
     if (Order.isHint(Hint)) {
       MCRegister PhysHint = Hint.asMCReg();
       LLVM_DEBUG(dbgs() << "missed hint " << printReg(PhysHint, TRI) << '\n');
 
       if (EvictAdvisor->canEvictHintInterference(VirtReg, PhysHint,
                                                  FixedRegisters)) {
+	LLVM_DEBUG(dbgs()<<"canEvictHintInterference.\n");
         evictInterference(VirtReg, PhysHint, NewVRegs);
         return PhysHint;
       }
 
       // We can also split the virtual register in cold blocks.
-      if (trySplitAroundHintReg(PhysHint, VirtReg, NewVRegs, Order))
+      if (trySplitAroundHintReg(PhysHint, VirtReg, NewVRegs, Order)) {
+	LLVM_DEBUG(dbgs()<<"We can also split the virtual register in cold blocks.\n");
         return MCRegister();
+      }
 
       // Record the missed hint, we may be able to recover
       // at the end if the surrounding allocation changed.
+      LLVM_DEBUG(dbgs()<<"insert VirtReg to BrokenHints.\n");
       SetOfBrokenHints.insert(&VirtReg);
     }
+  }
 
   // Try to evict interference from a cheaper alternative.
   uint8_t Cost = RegCosts[PhysReg.id()];
 
   // Most registers have 0 additional cost.
-  if (!Cost)
+  if (!Cost) {
+    LLVM_DEBUG(dbgs()<<"registers have 0 additional cost.\n");
+    LLVM_DEBUG(dbgs()<<"Use PhysReg: "<<printReg(PhysReg, TRI)<<"\n");
     return PhysReg;
+  }
 
   LLVM_DEBUG(dbgs() << printReg(PhysReg, TRI) << " is available at cost "
                     << (unsigned)Cost << '\n');
   MCRegister CheapReg = tryEvict(VirtReg, Order, NewVRegs, Cost, FixedRegisters);
+  if (CheapReg) {
+    LLVM_DEBUG(dbgs()<<"CheapReg: "<<printReg(CheapReg, TRI)<<"\n");
+  } else {
+    LLVM_DEBUG(dbgs()<<"PhysReg: "<<printReg(PhysReg, TRI)<<"\n");
+  }
   return CheapReg ? CheapReg : PhysReg;
 }
 
@@ -2563,6 +2591,7 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
       AllocationOrder::create(VirtReg.reg(), *VRM, RegClassInfo, Matrix);
   if (MCRegister PhysReg =
           tryAssign(VirtReg, Order, NewVRegs, FixedRegisters)) {
+    LLVM_DEBUG(dbgs()<<"Direct assignment.\n");
     // When NewVRegs is not empty, we may have made decisions such as evicting
     // a virtual register, go with the earlier decisions and use the physical
     // register.
@@ -2570,16 +2599,21 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
         EvictAdvisor->isUnusedCalleeSavedReg(PhysReg) && NewVRegs.empty()) {
       MCRegister CSRReg = tryAssignCSRFirstTime(VirtReg, Order, PhysReg,
                                                 CostPerUseLimit, NewVRegs);
-      if (CSRReg || !NewVRegs.empty())
+      if (CSRReg || !NewVRegs.empty()) {
         // Return now if we decide to use a CSR or create new vregs due to
         // pre-splitting.
         return CSRReg;
-    } else
+      }
+    } else {
+      LLVM_DEBUG(dbgs()<<"Direct PhysReg.\n");
       return PhysReg;
+    }
   }
   // Non empty NewVRegs means VirtReg has been split.
-  if (!NewVRegs.empty())
+  if (!NewVRegs.empty()) {
+    LLVM_DEBUG(dbgs()<<"VirtReg has been split.\n");
     return MCRegister();
+  }
 
   LiveRangeStage Stage = ExtraInfo->getStage(VirtReg);
   LLVM_DEBUG(dbgs() << StageName[Stage] << " Cascade "
@@ -2592,6 +2626,7 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
     if (MCRegister PhysReg =
             tryEvict(VirtReg, Order, NewVRegs, CostPerUseLimit,
                      FixedRegisters)) {
+      LLVM_DEBUG(dbgs()<<"Try to evict.\n");
       Register Hint = MRI->getSimpleHint(VirtReg.reg());
       // If VirtReg has a hint and that hint is broken record this
       // virtual register as a recoloring candidate for broken hint.
@@ -2617,6 +2652,7 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
   }
 
   if (Stage < RS_Spill && !VirtReg.empty()) {
+    LLVM_DEBUG(dbgs()<<"Try splitting.\n");
     // Try splitting VirtReg or interferences.
     unsigned NewVRegSizeBefore = NewVRegs.size();
     MCRegister PhysReg = trySplit(VirtReg, Order, NewVRegs, FixedRegisters);
@@ -2627,6 +2663,7 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
   // If we couldn't allocate a register from spilling, there is probably some
   // invalid inline assembly. The base class will report it.
   if (Stage >= RS_Done || !VirtReg.isSpillable()) {
+    LLVM_DEBUG(dbgs()<<"!!couldn't allocate a register from spilling.\n");
     return tryLastChanceRecoloring(VirtReg, Order, NewVRegs, FixedRegisters,
                                    RecolorStack, Depth);
   }
@@ -2651,6 +2688,7 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
 
   // The live virtual register requesting allocation was spilled, so tell
   // the caller not to allocate anything during this round.
+  LLVM_DEBUG(dbgs()<<"Spill itself\n");
   return MCRegister();
 }
 
@@ -2840,8 +2878,8 @@ bool RAGreedy::hasVirtRegAlloc() {
 }
 
 bool RAGreedy::run(MachineFunction &mf) {
-  LLVM_DEBUG(dbgs() << "********** GREEDY REGISTER ALLOCATION **********\n"
-                    << "********** Function: " << mf.getName() << '\n');
+  //dbgs() << "********** GREEDY REGISTER ALLOCATION **********\n"
+  //                  << "********** Function: " << mf.getName() << '\n';
 
   MF = &mf;
   TII = MF->getSubtarget().getInstrInfo();
@@ -2894,6 +2932,20 @@ bool RAGreedy::run(MachineFunction &mf) {
 
   allocatePhysRegs();
   tryHintsRecoloring();
+
+  /*dbgs() << "=== FINAL VIRTUAL TO PHYSICAL REGISTER ALLOCATIONS ===\n";
+  for (unsigned I = 0, E = MRI->getNumVirtRegs(); I != E; ++I) {
+    Register VirtReg = Register::index2VirtReg(I);
+    //if (MRI->reg_nodbg_empty(VirtReg))
+    //  continue;
+    if (VRM->hasPhys(VirtReg)) {
+      MCRegister PhysReg = VRM->getPhys(VirtReg);
+      dbgs() << printReg(VirtReg, TRI) << " -> " << printReg(PhysReg, TRI) << "\n";
+    } else {
+      dbgs() << printReg(VirtReg, TRI) << " -> NOT ALLOCATED (spilled)\n";
+    }
+  }
+  dbgs() << "=== END ALLOCATIONS ===\n";*/
 
   if (VerifyEnabled)
     MF->verify(LIS, Indexes, "Before post optimization", &errs());

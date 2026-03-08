@@ -102,6 +102,18 @@ struct HungoffOperandTraits {
   }
 };
 
+struct FixedoffOperandTraits {
+  static Use *op_begin(User* U) {
+    return U->getHungOffOperands();
+  }
+  static Use *op_end(User* U) {
+    return U->getHungOffOperands() + 2;
+  }
+  static unsigned operands(const User *U) {
+    return 2;
+  }
+};
+
 /// Macro for generating in-class operand accessor declarations.
 /// It should only be called in the public section of the interface.
 ///

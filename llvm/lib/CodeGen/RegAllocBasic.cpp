@@ -221,8 +221,8 @@ MCRegister RABasic::selectOrSplit(const LiveInterval &VirtReg,
 }
 
 bool RABasic::runOnMachineFunction(MachineFunction &mf) {
-  LLVM_DEBUG(dbgs() << "********** BASIC REGISTER ALLOCATION **********\n"
-                    << "********** Function: " << mf.getName() << '\n');
+  dbgs() << "********** BASIC REGISTER ALLOCATION **********\n"
+                    << "********** Function: " << mf.getName() << '\n';
 
   MF = &mf;
   auto &MBFI = getAnalysis<MachineBlockFrequencyInfoWrapperPass>().getMBFI();

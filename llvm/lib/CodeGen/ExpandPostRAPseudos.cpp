@@ -158,6 +158,7 @@ bool ExpandPostRA::run(MachineFunction &MF) {
 
       // Give targets a chance to expand even standard pseudos.
       if (TII->expandPostRAPseudo(MI)) {
+        LLVM_DEBUG(dbgs() << "expandPseudo: "<<MI);
         MadeChange = true;
         continue;
       }
@@ -168,6 +169,7 @@ bool ExpandPostRA::run(MachineFunction &MF) {
         MadeChange |= LowerSubregToReg(&MI);
         break;
       case TargetOpcode::COPY:
+        LLVM_DEBUG(dbgs() << "lowerCopy: "<<MI);
         TII->lowerCopy(&MI, TRI);
         MadeChange = true;
         break;

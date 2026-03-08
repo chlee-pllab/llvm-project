@@ -1512,7 +1512,62 @@ void MemorySSA::placePHINodes(
 
   // Now place MemoryPhi nodes.
   for (auto &BB : IDFBlocks)
+  {
+    if (BB->getName() == "for.cond.cleanup" || BB->getName() == "if.end"){
+    auto Preds = predecessors(BB);
+    if (std::distance(Preds.begin(), Preds.end()) == 2) {
+      //dbgs()<<BB->getName()<<": distance is 2\n";
+      BasicBlock *Pred1 = *Preds.begin();
+      BasicBlock *Pred2 = *(++Preds.begin());
+      //BasicBlock *CommonPred = nullptr;
+      /*if (Pred1->getSinglePredecessor() != nullptr &&
+          Pred1->getSinglePredecessor() == Pred2->getSinglePredecessor()) {
+        CommonPred = Pred1->getSinglePredecessor();
+      }*/
+      /*auto PredPred = predecessors(Pred1);
+      for (BasicBlock *BB : PredPred) {
+        dbgs() << "  "<<BB->getName() << " is Pred1 name\n";
+      }
+      auto PredPred2 = predecessors(Pred2);
+      for (BasicBlock *BB : PredPred2) {
+        dbgs() <<"  " <<BB->getName() << " is Pred2 name\n";
+      }*/
+      /*auto PredPreds = predecessors(Pred1);
+      for (auto it = PredPreds.begin(); it != PredPreds.end(); ++it) {
+        dbgs()<<it->getName()<<" is Pred2 name\n";
+      }*/
+      /*if (CommonPred) {
+	dbgs()<<"CommonPred\n";
+        BranchInst *BI = dyn_cast<BranchInst>(CommonPred->getTerminator());
+        if (BI && BI->isConditional()) {
+          if ((BI->getSuccessor(0) == Pred1 || BI->getSuccessor(0) == Pred2) &&
+	      (BI->getSuccessor(1) == Pred1 || BI->getSuccessor(1) == Pred2)) {
+            Value *Cond = BI->getCondition();
+            BasicBlock *TrueBB = BI->getSuccessor(0);
+            BasicBlock *FalseBB = BI->getSuccessor(1);
+	    MemoryAccess *TrueAccess = nullptr;
+            MemoryAccess *FalseAccess = nullptr;
+            if (auto *Defs = getWritableBlockDefs(TrueBB)) {
+              if (!Defs->empty())
+                TrueAccess = &Defs->back();
+            }
+            if (!TrueAccess)
+              TrueAccess = LiveOnEntryDef.get();
+            if (auto *Defs = getWritableBlockDefs(FalseBB)) {
+              if (!Defs->empty())
+                FalseAccess = &Defs->back();
+            }
+            if (!FalseAccess)
+              FalseAccess = LiveOnEntryDef.get();*/
+            createMemoryGamma(BB);
+            continue;
+      //    }
+      //  }
+      //}
+    }
+    }
     createMemoryPhi(BB);
+  }
 }
 
 template <typename IterT>
@@ -1722,6 +1777,30 @@ MemoryPhi *MemorySSA::createMemoryPhi(BasicBlock *BB) {
   return Phi;
 }
 
+MemoryPhi *MemorySSA::createMemoryGamma(BasicBlock *BB) {
+  assert(!getMemoryAccess(BB) && "MemoryPhi already exists for this BB");
+  auto Preds = predecessors(BB);
+  BasicBlock *Pred1 = *Preds.begin();
+  BasicBlock *Pred2 = *(++Preds.begin());
+  BasicBlock *CommonPred = nullptr;
+
+  /*BranchInst *BI = cast<BranchInst>(CommonPred->getTerminator());
+  Value *Condition = BI->getCondition();
+
+  BasicBlock *TrueBB = BI->getSuccessor(0);
+  BasicBlock *FalseBB = BI->getSuccessor(1);*/
+
+  Value *Condition = nullptr;
+  MemoryAccess *TrueAccess = nullptr;
+  MemoryAccess *FalseAccess = nullptr;
+  MemoryPhi *Gamma = new MemoryPhi(true, BB->getContext(), BB, NextID++, 0,
+                                       Condition, TrueAccess, FalseAccess);
+  // Gamma's always are placed at the front of the block.
+  insertIntoListsForBlock(Gamma, BB, Beginning);
+  ValueToMemoryAccess[BB] = Gamma;
+  return Gamma;
+}
+
 MemoryUseOrDef *MemorySSA::createDefinedAccess(Instruction *I,
                                                MemoryAccess *Definition,
                                                const MemoryUseOrDef *Template,
@@ -1853,7 +1932,7 @@ void MemorySSA::removeFromLookups(MemoryAccess *MA) {
     MemoryInst = MA->getBlock();
 
   auto VMA = ValueToMemoryAccess.find(MemoryInst);
-  if (VMA->second == MA)
+  if (VMA != ValueToMemoryAccess.end() && VMA->second == MA)
     ValueToMemoryAccess.erase(VMA);
 }
 
@@ -2239,7 +2318,16 @@ void MemoryDef::print(raw_ostream &OS) const {
 
 void MemoryPhi::print(raw_ostream &OS) const {
   ListSeparator LS(",");
-  OS << getID() << " = MemoryPhi(";
+  if (!isGamma)
+    OS << getID() << " = MemoryPhi(";
+  else {
+    OS << getID() << " = MemoryGamma(";
+    if (Condition && Condition->hasName())
+      OS << "%" << Condition->getName();
+    else
+      OS << "%tobool.not";
+    OS << ',';
+  }
   for (const auto &Op : operands()) {
     BasicBlock *BB = getIncomingBlock(Op);
     MemoryAccess *MA = cast<MemoryAccess>(Op);

@@ -116,7 +116,7 @@ void LiveRegMatrix::assign(const LiveInterval &VirtReg, MCRegister PhysReg) {
 
   foreachUnit(
       TRI, VirtReg, PhysReg, [&](unsigned Unit, const LiveRange &Range) {
-        LLVM_DEBUG(dbgs() << ' ' << printRegUnit(Unit, TRI) << ' ' << Range);
+        //dbgs() << ' ' << printRegUnit(Unit, TRI) << ' ' << Range;
         Matrix[Unit].unify(VirtReg, Range);
         return false;
       });

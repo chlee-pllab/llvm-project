@@ -217,6 +217,7 @@ public:
   }
 
 private:
+  void ProcessInSameBlock(MachineFunction &MF);
   bool ProcessBlock(MachineBasicBlock &MBB);
   void ProcessDbgInst(MachineInstr &MI);
   bool isLegalToBreakCriticalEdge(MachineInstr &MI, MachineBasicBlock *From,
@@ -242,6 +243,8 @@ private:
   /// False can be returned if, for instance, this is not profitable.
   bool PostponeSplitCriticalEdge(MachineInstr &MI, MachineBasicBlock *From,
                                  MachineBasicBlock *To, bool BreakPHIEdge);
+  bool SinkInSameInstruction(MachineInstr &MI, bool &SawStore,
+                       AllSuccsCache &AllSuccessors);
   bool SinkInstruction(MachineInstr &MI, bool &SawStore,
                        AllSuccsCache &AllSuccessors);
 
@@ -254,6 +257,9 @@ private:
   bool AllUsesDominatedByBlock(Register Reg, MachineBasicBlock *MBB,
                                MachineBasicBlock *DefMBB, bool &BreakPHIEdge,
                                bool &LocalUse) const;
+  MachineInstr *FindInSameSuccToSinkTo(MachineInstr &MI, MachineBasicBlock *MBB,
+                                      bool &BreakPHIEdge,
+                                      AllSuccsCache &AllSuccessors);
   MachineBasicBlock *FindSuccToSinkTo(MachineInstr &MI, MachineBasicBlock *MBB,
                                       bool &BreakPHIEdge,
                                       AllSuccsCache &AllSuccessors);
@@ -716,27 +722,27 @@ void MachineSinking::FindCycleSinkCandidates(
     MachineCycle *Cycle, MachineBasicBlock *BB,
     SmallVectorImpl<MachineInstr *> &Candidates) {
   for (auto &MI : *BB) {
-    LLVM_DEBUG(dbgs() << "CycleSink: Analysing candidate: " << MI);
+    dbgs() << "CycleSink: Analysing candidate: " << MI;
     if (MI.isMetaInstruction()) {
-      LLVM_DEBUG(dbgs() << "CycleSink: not sinking meta instruction\n");
+      dbgs() << "CycleSink: not sinking meta instruction\n";
       continue;
     }
     if (!TII->shouldSink(MI)) {
-      LLVM_DEBUG(dbgs() << "CycleSink: Instruction not a candidate for this "
-                           "target\n");
+      dbgs() << "CycleSink: Instruction not a candidate for this "
+                           "target\n";
       continue;
     }
     if (!isCycleInvariant(Cycle, MI)) {
-      LLVM_DEBUG(dbgs() << "CycleSink: Instruction is not cycle invariant\n");
+      dbgs() << "CycleSink: Instruction is not cycle invariant\n";
       continue;
     }
     bool DontMoveAcrossStore = true;
     if (!MI.isSafeToMove(DontMoveAcrossStore)) {
-      LLVM_DEBUG(dbgs() << "CycleSink: Instruction not safe to move.\n");
+      dbgs() << "CycleSink: Instruction not safe to move.\n";
       continue;
     }
     if (MI.mayLoad() && !mayLoadFromGOTOrConstantPool(MI)) {
-      LLVM_DEBUG(dbgs() << "CycleSink: Dont sink GOT or constant pool loads\n");
+      dbgs() << "CycleSink: Dont sink GOT or constant pool loads\n";
       continue;
     }
     if (MI.isConvergent())
@@ -748,7 +754,7 @@ void MachineSinking::FindCycleSinkCandidates(
     if (!MRI->hasOneDef(MO.getReg()))
       continue;
 
-    LLVM_DEBUG(dbgs() << "CycleSink: Instruction added as candidate.\n");
+    dbgs() << "CycleSink: Instruction added as candidate.\n";
     Candidates.push_back(&MI);
   }
 }
@@ -756,6 +762,7 @@ void MachineSinking::FindCycleSinkCandidates(
 PreservedAnalyses
 MachineSinkingPass::run(MachineFunction &MF,
                         MachineFunctionAnalysisManager &MFAM) {
+  dbgs()<<"MachineSinkingPass::run()\n";
   auto *DT = &MFAM.getResult<MachineDominatorTreeAnalysis>(MF);
   auto *PDT = &MFAM.getResult<MachinePostDominatorTreeAnalysis>(MF);
   auto *CI = &MFAM.getResult<MachineCycleAnalysis>(MF);
@@ -797,6 +804,7 @@ bool MachineSinkingLegacy::runOnMachineFunction(MachineFunction &MF) {
 
   TargetPassConfig *PassConfig = &getAnalysis<TargetPassConfig>();
   bool EnableSinkAndFold = PassConfig->getEnableSinkAndFold();
+  LLVM_DEBUG(dbgs()<<"EnableSinkAndFold: "<<EnableSinkAndFold<<"\n");
 
   auto *DT = &getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
   auto *PDT =
@@ -851,6 +859,7 @@ bool MachineSinking::run(MachineFunction &MF) {
     MachineDomTreeUpdater MDTU(DT, PDT,
                                MachineDomTreeUpdater::UpdateStrategy::Lazy);
     for (const auto &Pair : ToSplit) {
+      LLVM_DEBUG(dbgs()<<"Pair : ToSplit\n");
       auto NewSucc = Pair.first->SplitCriticalEdge(
           Pair.second, {LIS, SI, LV, MLI}, nullptr, &MDTU);
       if (NewSucc != nullptr) {
@@ -873,7 +882,11 @@ bool MachineSinking::run(MachineFunction &MF) {
     EverMadeChange = true;
   }
 
+  //[]
+  //ProcessInSameBlock(MF);
+
   if (SinkInstsIntoCycle) {
+    LLVM_DEBUG(dbgs()<<"SinkInstsIntoCycle.\n");
     SmallVector<MachineCycle *, 8> Cycles(CI->toplevel_cycles());
     SchedModel.init(STI);
     bool HasHighPressure;
@@ -883,9 +896,11 @@ bool MachineSinking::run(MachineFunction &MF) {
     enum CycleSinkStage { COPY, LOW_LATENCY, AGGRESSIVE, END };
     for (unsigned Stage = CycleSinkStage::COPY; Stage != CycleSinkStage::END;
          ++Stage, SunkInstrs.clear()) {
+      LLVM_DEBUG(dbgs()<<"for (Stage)\n");
       HasHighPressure = false;
 
       for (auto *Cycle : Cycles) {
+        LLVM_DEBUG(dbgs()<<"Cycle : Cycles\n");
         MachineBasicBlock *Preheader = Cycle->getCyclePreheader();
         if (!Preheader) {
           LLVM_DEBUG(dbgs() << "CycleSink: Can't find preheader\n");
@@ -946,15 +961,49 @@ bool MachineSinking::run(MachineFunction &MF) {
   return EverMadeChange;
 }
 
+//[]
+void MachineSinking::ProcessInSameBlock(MachineFunction &MF) {
+  for (auto &MBB : MF) {
+    LLVM_DEBUG(dbgs()<<"ProcessInSameBlock.\n");
+    AllSuccsCache AllSuccessors;
+    MachineBasicBlock::iterator I = MBB.end();
+    --I;
+    bool ProcessedBegin, SawStore = false;
+    do {
+      MachineInstr &MI = *I;
+      ProcessedBegin = I == MBB.begin();
+      if (!ProcessedBegin)
+        --I;
+      //LLVM_DEBUG(dbgs()<<MI<<"\n");
+      const TargetInstrInfo *TII = MI.getParent()->getParent()->getSubtarget().getInstrInfo();
+      StringRef Name = TII->getName(MI.getOpcode());
+      if (!Name.contains("PseudoVMV_V_I")) {
+        continue;
+      }
+
+      LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI);
+      if (SinkInSameInstruction(MI, SawStore, AllSuccessors)) {
+        LLVM_DEBUG(dbgs()<<"Sink success. \n");
+      }
+      break;
+    } while (!ProcessedBegin);
+    SeenDbgUsers.clear();
+    SeenDbgVars.clear();
+    CachedRegisterPressure.clear();
+  }
+}
+
 bool MachineSinking::ProcessBlock(MachineBasicBlock &MBB) {
+  LLVM_DEBUG(dbgs()<<"ProcessBlock.\n");
   if ((!EnableSinkAndFold && MBB.succ_size() <= 1) || MBB.empty())
     return false;
 
   // Don't bother sinking code out of unreachable blocks. In addition to being
   // unprofitable, it can also lead to infinite looping, because in an
   // unreachable cycle there may be nowhere to stop.
-  if (!DT->isReachableFromEntry(&MBB))
+  if (!DT->isReachableFromEntry(&MBB)) {
     return false;
+  }
 
   bool MadeChange = false;
 
@@ -974,27 +1023,35 @@ bool MachineSinking::ProcessBlock(MachineBasicBlock &MBB) {
     if (!ProcessedBegin)
       --I;
 
+    //LLVM_DEBUG(dbgs()<<MI<<"\n");
     if (MI.isDebugOrPseudoInstr() || MI.isFakeUse()) {
       if (MI.isDebugValue())
         ProcessDbgInst(MI);
+      LLVM_DEBUG(dbgs()<<"isDebug or Fake: "<<MI<<"\n");
       continue;
     }
 
     if (EnableSinkAndFold && PerformSinkAndFold(MI, &MBB)) {
       MadeChange = true;
+      LLVM_DEBUG(dbgs()<<"already PerformSinkAndFold: "<<MI<<"\n");
       continue;
     }
 
     // Can't sink anything out of a block that has less than two successors.
-    if (MBB.succ_size() <= 1)
-      continue;
-
-    if (PerformTrivialForwardCoalescing(MI, &MBB)) {
-      MadeChange = true;
+    if (MBB.succ_size() <= 1) {
+      //LLVM_DEBUG(dbgs()<<"Can't sink anything out of a block, succ_size: "<<MBB.succ_size()<<"\n");
       continue;
     }
 
+    if (PerformTrivialForwardCoalescing(MI, &MBB)) {
+      MadeChange = true;
+      LLVM_DEBUG(dbgs()<<"already PerformTrivialForwardCoalescing: "<<MI<<"\n");
+      continue;
+    }
+
+    LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI<<"\n");
     if (SinkInstruction(MI, SawStore, AllSuccessors)) {
+      LLVM_DEBUG(dbgs()<<"Sink success. \n");
       ++NumSunk;
       MadeChange = true;
     }
@@ -1263,14 +1320,17 @@ bool MachineSinking::isProfitableToSinkTo(Register Reg, MachineInstr &MI,
                                           MachineBasicBlock *MBB,
                                           MachineBasicBlock *SuccToSinkTo,
                                           AllSuccsCache &AllSuccessors) {
+  LLVM_DEBUG(dbgs()<<"isProfitableToSinkTo: "<<MI<<"\n");
   assert(SuccToSinkTo && "Invalid SinkTo Candidate BB");
 
-  if (MBB == SuccToSinkTo)
+  if (MBB == SuccToSinkTo) {
     return false;
+  }
 
   // It is profitable if SuccToSinkTo does not post dominate current block.
-  if (!PDT->dominates(SuccToSinkTo, MBB))
+  if (!PDT->dominates(SuccToSinkTo, MBB)) {
     return true;
+  }
 
   // It is profitable to sink an instruction from a deeper cycle to a shallower
   // cycle, even if the latter post-dominates the former (PR21115).
@@ -1399,11 +1459,45 @@ MachineSinking::GetAllSortedSuccessors(MachineInstr &MI, MachineBasicBlock *MBB,
   return it.first->second;
 }
 
+//[]
+MachineInstr *
+MachineSinking::FindInSameSuccToSinkTo(MachineInstr &MI, MachineBasicBlock *MBB,
+                                 bool &BreakPHIEdge,
+                                 AllSuccsCache &AllSuccessors) {
+  LLVM_DEBUG(dbgs()<<"FindInSameSuccToSinkTo.\n");
+  assert(MBB && "Invalid MachineBasicBlock!");
+
+  // loop over all the operands of the specified instruction.  If there is
+  // anything we can't handle, bail out.
+
+  // SuccToSinkTo - This is the successor to sink this instruction to, once we
+  // decide.
+  MachineInstr *SuccToSinkTo = nullptr;
+  const MachineOperand &MO = MI.getOperand(0);
+  Register Reg = MO.getReg();
+  LLVM_DEBUG(dbgs()<<"MO:"<<MO<<"\n");
+  for (MachineInstr &UseMI : *MBB) {
+    if (&UseMI == &MI) continue;
+    LLVM_DEBUG(dbgs()<<"UseMI: "<<UseMI);
+    if (UseMI.getNumOperands() > 0) {
+      const MachineOperand &UseOp = UseMI.getOperand(0);
+      if (UseOp.isReg() && UseOp.getReg() == Reg) {
+        LLVM_DEBUG(dbgs()<<"Found UseMI: "<<UseMI);
+        SuccToSinkTo = &UseMI;
+        break;
+      }
+    }
+  }
+
+  return SuccToSinkTo;
+}
+
 /// FindSuccToSinkTo - Find a successor to sink this instruction to.
 MachineBasicBlock *
 MachineSinking::FindSuccToSinkTo(MachineInstr &MI, MachineBasicBlock *MBB,
                                  bool &BreakPHIEdge,
                                  AllSuccsCache &AllSuccessors) {
+  LLVM_DEBUG(dbgs()<<"FindSuccToSinkTo.\n");
   assert(MBB && "Invalid MachineBasicBlock!");
 
   // loop over all the operands of the specified instruction.  If there is
@@ -1420,8 +1514,11 @@ MachineSinking::FindSuccToSinkTo(MachineInstr &MI, MachineBasicBlock *MBB,
     if (Reg == 0)
       continue;
 
+    LLVM_DEBUG(dbgs()<<"MO:"<<MO<<"\n");
     if (Reg.isPhysical()) {
+      LLVM_DEBUG(dbgs()<<"physical"<<"\n");
       if (MO.isUse()) {
+        LLVM_DEBUG(dbgs()<<"isUse"<<"\n");
         // If the physreg has no defs anywhere, it's just an ambient register
         // and we can freely move its uses. Alternatively, if it's allocatable,
         // it could get allocated to something with a def during allocation.
@@ -1432,13 +1529,17 @@ MachineSinking::FindSuccToSinkTo(MachineInstr &MI, MachineBasicBlock *MBB,
         return nullptr;
       }
     } else {
+      LLVM_DEBUG(dbgs()<<"virtual"<<"\n");
       // Virtual register uses are always safe to sink.
-      if (MO.isUse())
+      if (MO.isUse()) {
+        LLVM_DEBUG(dbgs()<<"isUse"<<"\n");
         continue;
+      }
 
       // If it's not safe to move defs of the register class, then abort.
-      if (!TII->isSafeToMoveRegClassDefs(MRI->getRegClass(Reg)))
+      if (!TII->isSafeToMoveRegClassDefs(MRI->getRegClass(Reg))) {
         return nullptr;
+      }
 
       // Virtual register defs can only be sunk if all their uses are in blocks
       // dominated by one of the successors.
@@ -1608,6 +1709,7 @@ using MIRegs = std::pair<MachineInstr *, SmallVector<Register, 2>>;
 static void performSink(MachineInstr &MI, MachineBasicBlock &SuccToSinkTo,
                         MachineBasicBlock::iterator InsertPos,
                         ArrayRef<MIRegs> DbgValuesToSink) {
+  LLVM_DEBUG(dbgs()<<"performSink.\n");
   // If we cannot find a location to use (merge with), then we erase the debug
   // location to prevent debug-info driven tools from potentially reporting
   // wrong location information.
@@ -1830,10 +1932,142 @@ bool MachineSinking::aggressivelySinkIntoCycle(
   return true;
 }
 
+//[]
+bool MachineSinking::SinkInSameInstruction(MachineInstr &MI, bool &SawStore,
+                                     AllSuccsCache &AllSuccessors) {
+  LLVM_DEBUG(dbgs()<<"SinkInSameInstruction.\n");
+  if (!TII->shouldSink(MI)) {
+    LLVM_DEBUG(dbgs()<<"should not sink.\n");
+    return false;
+  }
+  if (!MI.isSafeToMove(SawStore)) {
+    LLVM_DEBUG(dbgs()<<"not safe to move.\n");
+    return false;
+  }
+  if (MI.isConvergent()) {
+    LLVM_DEBUG(dbgs()<<"is convergent.\n");
+    return false;
+  }
+  if (SinkingPreventsImplicitNullCheck(MI, TII, TRI)) {
+    LLVM_DEBUG(dbgs()<<"not passing null check.\n");
+    return false;
+  }
+  bool BreakPHIEdge = false;
+  MachineBasicBlock *ParentBlock = MI.getParent();
+  MachineBasicBlock *SuccToSinkTo = MI.getParent();
+  MachineInstr *TargetUser =
+      FindInSameSuccToSinkTo(MI, ParentBlock, BreakPHIEdge, AllSuccessors);
+  if (!TargetUser)
+    return false;
+  LLVM_DEBUG(dbgs()<<"TargetUser: "<<*TargetUser);
+  for (const MachineOperand &MO : MI.all_defs()) {
+    Register Reg = MO.getReg();
+    if (Reg == 0 || !Reg.isPhysical())
+      continue;
+    if (SuccToSinkTo->isLiveIn(Reg))
+      return false;
+  }
+
+  LLVM_DEBUG(dbgs() << "Sink instr " << MI << "\tinto block " << *SuccToSinkTo);
+
+  // If the block has multiple predecessors, this is a critical edge.
+  // Decide if we can sink along it or need to break the edge.
+  if (SuccToSinkTo->pred_size() > 1) {
+    // We cannot sink a load across a critical edge - there may be stores in
+    // other code paths.
+    bool TryBreak = false;
+    bool Store =
+        MI.mayLoad() ? hasStoreBetween(ParentBlock, SuccToSinkTo, MI) : true;
+    if (!MI.isSafeToMove(Store)) {
+      LLVM_DEBUG(dbgs() << " *** NOTE: Won't sink load along critical edge.\n");
+      TryBreak = true;
+    }
+
+    // We don't want to sink across a critical edge if we don't dominate the
+    // successor. We could be introducing calculations to new code paths.
+    if (!TryBreak && !DT->dominates(ParentBlock, SuccToSinkTo)) {
+      LLVM_DEBUG(dbgs() << " *** NOTE: Critical edge found\n");
+      TryBreak = true;
+    }
+
+    // Don't sink instructions into a cycle.
+    if (!TryBreak && CI->getCycle(SuccToSinkTo) &&
+        (!CI->getCycle(SuccToSinkTo)->isReducible() ||
+         CI->getCycle(SuccToSinkTo)->getHeader() == SuccToSinkTo)) {
+      LLVM_DEBUG(dbgs() << " *** NOTE: cycle header found\n");
+      TryBreak = true;
+    }
+
+    // Otherwise we are OK with sinking along a critical edge.
+    if (!TryBreak)
+      LLVM_DEBUG(dbgs() << "Sinking along critical edge.\n");
+    else {
+      // Mark this edge as to be split.
+      // If the edge can actually be split, the next iteration of the main loop
+      // will sink MI in the newly created block.
+      bool Status = PostponeSplitCriticalEdge(MI, ParentBlock, SuccToSinkTo,
+                                              BreakPHIEdge);
+      if (!Status)
+        LLVM_DEBUG(dbgs() << " *** PUNTING: Not legal or profitable to "
+                             "break critical edge\n");
+      // The instruction will not be sunk this time.
+      return false;
+    }
+  }
+
+  if (BreakPHIEdge) {
+    // BreakPHIEdge is true if all the uses are in the successor MBB being
+    // sunken into and they are all PHI nodes. In this case, machine-sink must
+    // break the critical edge first.
+    bool Status =
+        PostponeSplitCriticalEdge(MI, ParentBlock, SuccToSinkTo, BreakPHIEdge);
+    if (!Status)
+      LLVM_DEBUG(dbgs() << " *** PUNTING: Not legal or profitable to "
+                           "break critical edge\n");
+    // The instruction will not be sunk this time.
+    return false;
+  }
+  //MachineBasicBlock::iterator InsertPos =
+  //    SuccToSinkTo->SkipPHIsAndLabels(SuccToSinkTo->begin());
+  MachineBasicBlock::iterator InsertPos = TargetUser->getIterator();
+  MachineBasicBlock::iterator CurrPos = MI.getIterator();
+  //if (blockPrologueInterferes(SuccToSinkTo, InsertPos, MI, TRI, TII, MRI)) {
+  //  LLVM_DEBUG(dbgs() << " *** Not sinking: prologue interference\n");
+  //  return false;
+  //}
+  SmallVector<MIRegs, 4> DbgUsersToSink;
+  for (auto &MO : MI.all_defs()) {
+    if (!MO.getReg().isVirtual())
+      continue;
+    auto It = SeenDbgUsers.find(MO.getReg());
+    if (It == SeenDbgUsers.end())
+      continue;
+    auto &Users = It->second;
+    for (auto &User : Users) {
+      MachineInstr *DbgMI = User.getPointer();
+      if (User.getInt()) {
+        if (!attemptDebugCopyProp(MI, *DbgMI, MO.getReg()))
+          DbgMI->setDebugValueUndef();
+      } else {
+        DbgUsersToSink.push_back(
+            {DbgMI, SmallVector<Register, 2>(1, MO.getReg())});
+      }
+    }
+  }
+  if (MI.getMF()->getFunction().getSubprogram() && MI.isCopy())
+    SalvageUnsunkDebugUsersOfCopy(MI, SuccToSinkTo);
+  //performSink(MI, *SuccToSinkTo, InsertPos, DbgUsersToSink);
+  SuccToSinkTo->splice(InsertPos, SuccToSinkTo, CurrPos);
+  for (MachineOperand &MO : MI.all_uses())
+    RegsToClearKillFlags.insert(MO.getReg());
+  return true;
+}
+
 /// SinkInstruction - Determine whether it is safe to sink the specified machine
 /// instruction out of its current block into a successor.
 bool MachineSinking::SinkInstruction(MachineInstr &MI, bool &SawStore,
                                      AllSuccsCache &AllSuccessors) {
+  LLVM_DEBUG(dbgs()<<"SinkInstruction.\n");
   // Don't sink instructions that the target prefers not to sink.
   if (!TII->shouldSink(MI))
     return false;

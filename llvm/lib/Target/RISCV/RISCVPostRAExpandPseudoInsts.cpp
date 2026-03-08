@@ -71,14 +71,32 @@ bool RISCVPostRAExpandPseudo::expandMBB(MachineBasicBlock &MBB) {
 bool RISCVPostRAExpandPseudo::expandMI(MachineBasicBlock &MBB,
                                        MachineBasicBlock::iterator MBBI,
                                        MachineBasicBlock::iterator &NextMBBI) {
+  //llvm::dbgs() << "Before expansion:\n";
+  //MBBI->print(llvm::dbgs());
+  bool Result = false;
+
   switch (MBBI->getOpcode()) {
   case RISCV::PseudoMovImm:
-    return expandMovImm(MBB, MBBI);
+    Result = expandMovImm(MBB, MBBI);
   case RISCV::PseudoMovAddr:
-    return expandMovAddr(MBB, MBBI);
+    Result = expandMovAddr(MBB, MBBI);
   default:
-    return false;
+    Result = false;
   }
+
+  if (Result) {
+    //llvm::dbgs() << "Was replaced by:\n";
+    MachineBasicBlock::iterator It = std::prev(NextMBBI);
+    while (It != MBB.end()) {
+      It->print(llvm::dbgs());
+      if (It == MBBI) break;
+      --It;
+    }
+  } else {
+    //llvm::dbgs() << "No expansion performed\n";
+  }
+
+  return Result;
 }
 
 bool RISCVPostRAExpandPseudo::expandMovImm(MachineBasicBlock &MBB,

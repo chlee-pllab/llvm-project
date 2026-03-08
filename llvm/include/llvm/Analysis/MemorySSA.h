@@ -156,7 +156,7 @@ public:
   // dyn_cast
   static bool classof(const Value *V) {
     unsigned ID = V->getValueID();
-    return ID == MemoryUseVal || ID == MemoryPhiVal || ID == MemoryDefVal;
+    return ID == MemoryUseVal || ID == MemoryPhiVal || ID == MemoryDefVal || ID == MemoryGammaVal;
   }
 
   BasicBlock *getBlock() const { return Block; }
@@ -490,7 +490,14 @@ public:
 
   MemoryPhi(LLVMContext &C, BasicBlock *BB, unsigned Ver, unsigned NumPreds = 0)
       : MemoryAccess(C, MemoryPhiVal, deleteMe, BB, AllocMarker), ID(Ver),
-        ReservedSpace(NumPreds) {
+        ReservedSpace(NumPreds), isGamma(false) {
+    allocHungoffUses(ReservedSpace);
+  }
+
+  MemoryPhi(bool isGamma, LLVMContext &C, BasicBlock *BB, unsigned Ver, unsigned NumPreds = 0,
+	    Value *Condition = nullptr, MemoryAccess *TrueDef = nullptr, MemoryAccess *FalseDef = nullptr)
+      : MemoryAccess(C, MemoryPhiVal, deleteMe, BB, AllocMarker), ID(Ver),
+        ReservedSpace(NumPreds), isGamma(true), Condition(Condition), TrueDef(TrueDef), FalseDef(FalseDef) {
     allocHungoffUses(ReservedSpace);
   }
 
@@ -524,6 +531,24 @@ public:
   op_range incoming_values() { return operands(); }
 
   const_op_range incoming_values() const { return operands(); }
+
+  Value *getCondition() const { return Condition; }
+  void setCondition(Value *Cond) { Condition = Cond; }
+
+  bool getGamma() const { return isGamma; }
+  void setGamma(bool *Gamma) { isGamma = Gamma; }
+
+  MemoryAccess *getTrueAccess() const { return TrueDef; }
+  void setTrueAccess(MemoryAccess *MA) {
+    assert(MA && "MemoryGamma got a null true access!");
+    TrueDef = MA;
+  }
+
+  MemoryAccess *getFalseAccess() const { return FalseDef; }
+  void setFalseAccess(MemoryAccess *MA) {
+    assert(MA && "MemoryGamma got a null false access!");
+    FalseDef = MA;
+  }
 
   /// Return the number of incoming edges
   unsigned getNumIncomingValues() const { return getNumOperands(); }
@@ -643,10 +668,16 @@ protected:
     User::allocHungoffUses(N, /* IsPhi */ true);
   }
 
+  static void deleteMe(DerivedUser *Self);
+
 private:
   // For debugging only
   const unsigned ID;
   unsigned ReservedSpace;
+  bool isGamma = false;
+  Value *Condition;
+  MemoryAccess *TrueDef;
+  MemoryAccess *FalseDef;
 
   /// This grows the operand list in response to a push_back style of
   /// operation.  This grows the number of ops by 1.5 times.
@@ -657,7 +688,6 @@ private:
     growHungoffUses(ReservedSpace, /* IsPhi */ true);
   }
 
-  static void deleteMe(DerivedUser *Self);
 };
 
 inline unsigned MemoryAccess::getID() const {
@@ -867,6 +897,7 @@ private:
 
   void markUnreachableAsLiveOnEntry(BasicBlock *BB);
   MemoryPhi *createMemoryPhi(BasicBlock *BB);
+  MemoryPhi *createMemoryGamma(BasicBlock *BB);
   template <typename AliasAnalysisType>
   MemoryUseOrDef *createNewAccess(Instruction *, AliasAnalysisType *,
                                   const MemoryUseOrDef *Template = nullptr);

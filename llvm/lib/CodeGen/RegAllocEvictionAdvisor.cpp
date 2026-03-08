@@ -27,6 +27,10 @@
 
 using namespace llvm;
 
+static cl::opt<bool>
+    Skip("skip", cl::init(false), cl::Hidden,
+               cl::desc("Skip v0 during allocating vector register"));
+
 static cl::opt<RegAllocEvictionAdvisorAnalysisLegacy::AdvisorMode> Mode(
     "regalloc-enable-advisor", cl::Hidden,
     cl::init(RegAllocEvictionAdvisorAnalysisLegacy::AdvisorMode::Default),
@@ -139,6 +143,11 @@ void RegAllocEvictionAdvisorAnalysis::initializeProvider(
 RegAllocEvictionAdvisorAnalysis::Result
 RegAllocEvictionAdvisorAnalysis::run(MachineFunction &MF,
                                      MachineFunctionAnalysisManager &MFAM) {
+  if (Skip) {
+    dbgs()<<"Skip v0 enabled.\n";
+  } else {
+    dbgs()<<"Skip v0 disabled.\n";
+  }
   // Lazy initialization of the provider.
   initializeProvider(::Mode, MF.getFunction().getContext());
   return Result{Provider.get()};
@@ -351,6 +360,15 @@ MCRegister DefaultEvictionAdvisor::tryFindEvictionCandidate(
        ++I) {
     MCRegister PhysReg = *I;
     assert(PhysReg);
+
+    //[]
+    //dbgs() << "PhysReg id: " << PhysReg.id()
+    //   << " name: " << TRI->getName(PhysReg) << "\n";
+    if (Skip) {
+      if (PhysReg.id() == 287)
+        continue;
+    }
+
     if (!canAllocatePhysReg(CostPerUseLimit, PhysReg) ||
         !canEvictInterferenceBasedOnCost(VirtReg, PhysReg, false, BestCost,
                                          FixedRegisters))

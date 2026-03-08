@@ -61,6 +61,22 @@ void initializeRISCVFoldMemOffsetPass(PassRegistry &);
 FunctionPass *createRISCVMergeBaseOffsetOptPass();
 void initializeRISCVMergeBaseOffsetOptPass(PassRegistry &);
 
+FunctionPass *createUniformityBeforePhiWrapperPass();
+void initializeUniformityBeforePhiWrapperPass(PassRegistry &);
+extern char &UniformityBeforePhiWrapperID;
+
+FunctionPass *createExpandPseudosPass();
+void initializeExpandPseudosPass(PassRegistry &);
+extern char &ExpandPseudosID;
+
+FunctionPass *createRISCVSinkPass();
+void initializeRISCVSinkPass(PassRegistry &);
+extern char &RISCVSinkID;
+
+FunctionPass *createRISCVRegisterPressurePass();
+void initializeRISCVRegisterPressurePass(PassRegistry &);
+extern char &RISCVRegisterPressureID;
+
 FunctionPass *createRISCVExpandPseudoPass();
 void initializeRISCVExpandPseudoPass(PassRegistry &);
 

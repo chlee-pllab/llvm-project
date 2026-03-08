@@ -43,6 +43,7 @@ struct OperandTraits;
 
 class User : public Value {
   friend struct HungoffOperandTraits;
+  friend struct FixedoffOperandTraits;
   template <class ConstantClass> friend struct ConstantAggrKeyType;
 
   LLVM_ATTRIBUTE_ALWAYS_INLINE static void *
