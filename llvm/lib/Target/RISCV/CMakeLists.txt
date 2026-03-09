@@ -33,7 +33,6 @@ add_public_tablegen_target(RISCVCommonTableGen)
 add_llvm_target(RISCVCodeGen
   UniformityBeforePhiWrapper.cpp
   ExpandPseudos.cpp
-  RISCVSink.cpp
   RISCVRegisterPressure.cpp
   RISCVAsmPrinter.cpp
   RISCVCallingConv.cpp

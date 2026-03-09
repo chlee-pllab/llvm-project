@@ -141,7 +141,6 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeRISCVTarget() {
   initializeRISCVAsmPrinterPass(*PR);
   initializeUniformityBeforePhiWrapperPass(*PR);
   initializeExpandPseudosPass(*PR);
-  initializeRISCVSinkPass(*PR);
   initializeRISCVRegisterPressurePass(*PR);
 }
 
@@ -485,7 +484,7 @@ void RISCVPassConfig::addOptimizedRegAlloc() {
 
   //insertPass(&MachineSchedulerID, &RISCVRegisterPressureID);
   insertPass(&MachineSchedulerID, &ExpandPseudosID);
-  insertPass(&ExpandPostRAPseudosID, &RISCVSinkID);
+  //insertPass(&ExpandPostRAPseudosID, &RISCVSinkID);
   TargetPassConfig::addOptimizedRegAlloc();
 }
 

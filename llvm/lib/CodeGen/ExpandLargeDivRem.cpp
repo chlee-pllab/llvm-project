@@ -270,7 +270,7 @@ static bool addVP(Function &F, const TargetLowering &TLI) {
 }
 
 static bool runImpl(Function &F, const TargetLowering &TLI) {
-  addVP(F, TLI);
+  //addVP(F, TLI);
 
   SmallVector<BinaryOperator *, 4> Replace;
   SmallVector<BinaryOperator *, 4> ReplaceVector;
