@@ -190,8 +190,18 @@ ExpandPseudos::FindInSameSuccToSinkTo(MachineInstr &MI, MachineBasicBlock *MBB,
         }
       }
     }
+    if (UseMI.getOpcode() == RISCV::PseudoVFADD_VV_M8_E32) {
+      for (unsigned i = 0; i < UseMI.getNumOperands(); i++) {
+        const MachineOperand &UseOp = UseMI.getOperand(i);
+        if (UseOp.isReg() && UseOp.getReg() == Reg) {
+          LLVM_DEBUG(dbgs()<<"  Found UseMI: "<<UseMI);
+          LLVM_DEBUG(dbgs() << "  "<<UseOp<<" is used as operand " << i << "\n");
+          SuccToSinkTo = &UseMI;
+          return SuccToSinkTo;
+	}
+      }
+    }
   }
-
   return SuccToSinkTo;
 }
 
@@ -262,14 +272,19 @@ bool ExpandPseudos::SinkInSameInstruction(MachineInstr &MI, bool &SawStore,
 }
 
 void ExpandPseudos::ProcessInSameBlock(MachineFunction &MF) {
+  int LoadTime256 = 0;
+  int LoadTime384 = 0;
+  DenseSet<Register> SinkRegs;
   for (auto &MBB : MF) {
     LLVM_DEBUG(dbgs()<<"ProcessInSameBlock.\n");
     AllSuccsCache AllSuccessors;
     //MachineBasicBlock::iterator I = MBB.end();
     //--I;
     bool ProcessedBegin, SawStore = false;
-    for (auto It = MBB.begin(); It != MBB.end(); ++It){
+    for (auto It = MBB.begin(); It != MBB.end(); ){
       MachineInstr &MI = *It;
+      bool Sunk = false;
+      auto NextIt = std::next(It);
       //ProcessedBegin = I == MBB.begin();
       //if (!ProcessedBegin)
       //  --I;
@@ -283,9 +298,52 @@ void ExpandPseudos::ProcessInSameBlock(MachineFunction &MF) {
           LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI);
           if (SinkInSameInstruction(MI, SawStore, AllSuccessors)) {
             LLVM_DEBUG(dbgs()<<"Sink success. \n");
-            break;
+            Sunk = true;
           }
         }
+      }
+      else if (Name.contains("PseudoVLE32_V_M8")) {
+        const MachineOperand &Dst = MI.getOperand(0);
+        const MachineOperand &Src = MI.getOperand(1);
+        if (Dst.isReg() && Src.isReg()) {
+          Register DstReg = Dst.getReg();
+          //Register SrcReg = Src.getReg();
+	  if (!SinkRegs.count(DstReg) && MI.memoperands_begin() != MI.memoperands_end()) {
+            const MachineMemOperand *MMO = *MI.memoperands_begin();
+            if (const Value *PtrVal = MMO->getValue()) {
+              int64_t Offset = MMO->getOffset();
+              if (Offset == 256) {
+                LLVM_DEBUG(dbgs() << "Matched 3rd VLE32 load: offset=" << Offset << "\n");
+		++LoadTime256;
+                if (1 <= LoadTime256 && LoadTime256 <= 4) {
+		  SinkRegs.insert(DstReg);
+                  LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI);
+                  if (SinkInSameInstruction(MI, SawStore, AllSuccessors)) {
+                    LLVM_DEBUG(dbgs()<<"Sink success. \n");
+                    Sunk = true;
+                  }
+		}
+              }
+              if (Offset == 384) {
+                LLVM_DEBUG(dbgs() << "Matched 4th VLE32 load: offset=" << Offset << "\n");
+		++LoadTime384;
+                if (1 <= LoadTime384 && LoadTime384 <= 4) {
+		  SinkRegs.insert(DstReg);
+                  LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI);
+                  if (SinkInSameInstruction(MI, SawStore, AllSuccessors)) {
+                    LLVM_DEBUG(dbgs()<<"Sink success. \n");
+                    Sunk = true;
+                  }
+		}
+              }
+            }
+          } 
+	}
+      }
+      if (Sunk) {
+        It = NextIt;
+      } else {
+        ++It;
       }
     }// while (!ProcessedBegin);
     SeenDbgUsers.clear();
