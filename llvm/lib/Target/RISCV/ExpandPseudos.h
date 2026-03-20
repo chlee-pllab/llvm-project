@@ -85,7 +85,11 @@ private:
                                       AllSuccsCache &AllSuccessors);
   bool SinkInSameInstruction(MachineInstr &MI, bool &SawStore,
                        AllSuccsCache &AllSuccessors);
+  bool SinkInSameInstructionGroup(
+    SmallVectorImpl<MachineInstr *> &InstrsToSink, bool &SawStore,
+    AllSuccsCache &AllSuccessors);
   void ProcessInSameBlock(MachineFunction &MF);
+  void ProcessInSameAffine(MachineFunction &MF);
   bool runSink(MachineFunction &MF);
   bool LowerCopy(MachineBasicBlock &MBB, MachineInstr &MI);
 };

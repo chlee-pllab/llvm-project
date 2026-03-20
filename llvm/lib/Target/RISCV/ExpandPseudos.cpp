@@ -25,6 +25,10 @@ static cl::opt<bool>
     Sink("sink", cl::init(false), cl::Hidden,
                cl::desc("Enable sinking"));
 
+static cl::opt<bool>
+    a("a", cl::init(false), cl::Hidden,
+               cl::desc("Enable affine"));
+
 ExpandPseudos::ExpandPseudos() : MachineFunctionPass(ID) {
   initializeExpandPseudosPass(*PassRegistry::getPassRegistry());
 }
@@ -234,17 +238,9 @@ bool ExpandPseudos::SinkInSameInstruction(MachineInstr &MI, bool &SawStore,
     if (SuccToSinkTo->isLiveIn(Reg))
       return false;
   }
-
   LLVM_DEBUG(dbgs() << "Sink instr " << MI);
-
-  //MachineBasicBlock::iterator InsertPos =
-  //    SuccToSinkTo->SkipPHIsAndLabels(SuccToSinkTo->begin());
   MachineBasicBlock::iterator InsertPos = TargetUser->getIterator();
   MachineBasicBlock::iterator CurrPos = MI.getIterator();
-  //if (blockPrologueInterferes(SuccToSinkTo, InsertPos, MI, TRI, TII, MRI)) {
-  //  LLVM_DEBUG(dbgs() << " *** Not sinking: prologue interference\n");
-  //  return false;
-  //}
   SmallVector<MIRegs, 4> DbgUsersToSink;
   for (auto &MO : MI.all_defs()) {
     if (!MO.getReg().isVirtual())
@@ -271,7 +267,83 @@ bool ExpandPseudos::SinkInSameInstruction(MachineInstr &MI, bool &SawStore,
   return true;
 }
 
+bool ExpandPseudos::SinkInSameInstructionGroup(
+    SmallVectorImpl<MachineInstr *> &InstrsToSink, bool &SawStore,
+    AllSuccsCache &AllSuccessors) {
+  LLVM_DEBUG(dbgs() << "SinkInSameInstructionGroup with "
+                    << InstrsToSink.size() << " instructions.\n");
+  if (InstrsToSink.empty())
+    return false;
+  MachineInstr &PrimaryMI = *InstrsToSink[0];
+  for (MachineInstr *MI : InstrsToSink) {
+    if (!TII->shouldSink(*MI)) {
+      LLVM_DEBUG(dbgs() << "should not sink: " << *MI);
+      return false;
+    }
+    if (!MI->isSafeToMove(SawStore)) {
+      LLVM_DEBUG(dbgs() << "not safe to move: " << *MI);
+      return false;
+    }
+    if (MI->isConvergent()) {
+      LLVM_DEBUG(dbgs() << "is convergent: " << *MI);
+      return false;
+    }
+  }
+  bool BreakPHIEdge = false;
+  MachineBasicBlock *ParentBlock = PrimaryMI.getParent();
+  MachineBasicBlock *SuccToSinkTo = PrimaryMI.getParent();
+  MachineInstr *TargetUser =
+      FindInSameSuccToSinkTo(PrimaryMI, ParentBlock, BreakPHIEdge, AllSuccessors);
+  if (!TargetUser)
+    return false;
+  for (MachineInstr *MI : InstrsToSink) {
+    for (const MachineOperand &MO : MI->all_defs()) {
+      Register Reg = MO.getReg();
+      if (Reg == 0 || !Reg.isPhysical())
+        continue;
+      if (SuccToSinkTo->isLiveIn(Reg))
+        return false;
+    }
+  }
+  LLVM_DEBUG(dbgs() << "Sinking group of instructions\n");
+  for (MachineInstr *MI : InstrsToSink) {
+    LLVM_DEBUG(dbgs() << "  " << *MI);
+  }
+  MachineBasicBlock::iterator InsertPos = TargetUser->getIterator();
+  for (auto It = InstrsToSink.begin(); It != InstrsToSink.end(); ++It) {
+    MachineInstr *MI = *It;
+    MachineBasicBlock::iterator CurrPos = MI->getIterator();
+    SuccToSinkTo->splice(InsertPos, SuccToSinkTo, CurrPos);
+    InsertPos = MI->getIterator();
+  }
+  SmallVector<MIRegs, 4> DbgUsersToSink;
+  for (MachineInstr *MI : InstrsToSink) {
+    for (auto &MO : MI->all_defs()) {
+      if (!MO.getReg().isVirtual())
+        continue;
+      auto It = SeenDbgUsers.find(MO.getReg());
+      if (It == SeenDbgUsers.end())
+        continue;
+      auto &Users = It->second;
+      for (auto &User : Users) {
+        MachineInstr *DbgMI = User.getPointer();
+        if (User.getInt()) {
+          if (!attemptDebugCopyProp(*MI, *DbgMI, MO.getReg()))
+            DbgMI->setDebugValueUndef();
+        } else {
+          DbgUsersToSink.push_back(
+              {DbgMI, SmallVector<Register, 2>(1, MO.getReg())});
+        }
+      }
+    }
+    for (MachineOperand &MO : MI->all_uses())
+      RegsToClearKillFlags.insert(MO.getReg());
+  }
+  return true;
+}
+
 void ExpandPseudos::ProcessInSameBlock(MachineFunction &MF) {
+  int SinkVMVTime = 0;
   int LoadTime256 = 0;
   int LoadTime384 = 0;
   DenseSet<Register> SinkRegs;
@@ -294,7 +366,8 @@ void ExpandPseudos::ProcessInSameBlock(MachineFunction &MF) {
       if (Name.contains("PseudoVMV_V_I")) {
         const MachineOperand &Dst = MI.getOperand(0);
         const MachineOperand &MO = MI.getOperand(1);
-        if (Dst.isReg() && MO.isReg() && Dst.getReg() == MO.getReg()) {
+        ++SinkVMVTime;
+        if (SinkVMVTime <= 2 && Dst.isReg() && MO.isReg() && Dst.getReg() == MO.getReg()) {
           LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI);
           if (SinkInSameInstruction(MI, SawStore, AllSuccessors)) {
             LLVM_DEBUG(dbgs()<<"Sink success. \n");
@@ -302,7 +375,7 @@ void ExpandPseudos::ProcessInSameBlock(MachineFunction &MF) {
           }
         }
       }
-      else if (Name.contains("PseudoVLE32_V_M8")) {
+      if (Name.contains("PseudoVLE32_V_M8")) {
         const MachineOperand &Dst = MI.getOperand(0);
         const MachineOperand &Src = MI.getOperand(1);
         if (Dst.isReg() && Src.isReg()) {
@@ -312,29 +385,68 @@ void ExpandPseudos::ProcessInSameBlock(MachineFunction &MF) {
             const MachineMemOperand *MMO = *MI.memoperands_begin();
             if (const Value *PtrVal = MMO->getValue()) {
               int64_t Offset = MMO->getOffset();
+              bool ShouldSink = false;
               if (Offset == 256) {
                 LLVM_DEBUG(dbgs() << "Matched 3rd VLE32 load: offset=" << Offset << "\n");
 		++LoadTime256;
                 if (1 <= LoadTime256 && LoadTime256 <= 4) {
-		  SinkRegs.insert(DstReg);
-                  LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI);
-                  if (SinkInSameInstruction(MI, SawStore, AllSuccessors)) {
-                    LLVM_DEBUG(dbgs()<<"Sink success. \n");
-                    Sunk = true;
-                  }
+                  ShouldSink = true;
 		}
               }
               if (Offset == 384) {
                 LLVM_DEBUG(dbgs() << "Matched 4th VLE32 load: offset=" << Offset << "\n");
 		++LoadTime384;
                 if (1 <= LoadTime384 && LoadTime384 <= 4) {
-		  SinkRegs.insert(DstReg);
-                  LLVM_DEBUG(dbgs()<<"Prepare to sink "<<MI);
-                  if (SinkInSameInstruction(MI, SawStore, AllSuccessors)) {
-                    LLVM_DEBUG(dbgs()<<"Sink success. \n");
-                    Sunk = true;
-                  }
+                  ShouldSink = true;
 		}
+              }
+	      if (ShouldSink) {
+                SinkRegs.insert(DstReg);
+                LLVM_DEBUG(dbgs()<<"!Prepare to sink Group "<<MI);
+                SmallVector<MachineInstr*, 4> InstructionsToSink;
+                InstructionsToSink.push_back(&MI);
+                Register LDReg = MI.getOperand(0).getReg();
+                Register MaskReg = 0;
+		for (MachineOperand &MO : MI.all_uses()) {
+                  if (MO.isReg() && !MO.getReg().isVirtual()) {
+                    LLVM_DEBUG(dbgs() <<"  Found MaskReg: " <<MO<<"\n");
+		    MaskReg = MO.getReg();
+                    break;
+                  }
+                }
+                if (MaskReg) {
+                  MachineInstr *MaskDef = nullptr;
+                  for (auto It = MI.getIterator(); It != MI.getParent()->begin(); --It) {
+                    MachineInstr &Candidate = *std::prev(It);
+                    LLVM_DEBUG(dbgs() <<"  Reverse to find Mask: " <<Candidate);
+                    for (MachineOperand &DefMO : Candidate.all_defs()) {
+                      if (DefMO.isReg() && DefMO.getReg() == MaskReg) {
+                        MaskDef = &Candidate;
+                        break;
+                      }
+                    }
+                    if (MaskDef)
+                      break;
+                  }
+                  StringRef Name = TII->getName(MaskDef->getOpcode());
+                  if (MaskDef && Name.contains("COPY")) {
+                    LLVM_DEBUG(dbgs() <<"  Found Mask setup: " <<*MaskDef);
+                    InstructionsToSink.push_back(MaskDef);
+                  }
+                }
+		for (MachineInstr &UseMI : MRI->def_instructions(LDReg)) {
+                  if (&UseMI == &MI) continue;
+                  StringRef Name = TII->getName(UseMI.getOpcode());
+                  if (Name.contains("PseudoVMV_V_I_M8")) {
+                    LLVM_DEBUG(dbgs() <<"  Found VMV setup: " <<UseMI);
+                    InstructionsToSink.push_back(&UseMI);
+                    break;
+                  }
+                }
+                if (SinkInSameInstructionGroup(InstructionsToSink, SawStore, AllSuccessors)) {
+                  LLVM_DEBUG(dbgs()<<"Sink Group success. \n");
+                  Sunk = true;
+                }
               }
             }
           } 
@@ -352,12 +464,104 @@ void ExpandPseudos::ProcessInSameBlock(MachineFunction &MF) {
   }
 }
 
+void ExpandPseudos::ProcessInSameAffine(MachineFunction &MF) {
+  for (auto &MBB : MF) {
+    LLVM_DEBUG(dbgs() << "ProcessInSameAffine.\n");
+    for (auto I = MBB.begin(), E = MBB.end(); I != E; ++I) {
+      MachineInstr &MI = *I;
+      LLVM_DEBUG(dbgs() << MI);
+      const TargetInstrInfo *TII = MI.getParent()->getParent()->getSubtarget().getInstrInfo();
+      if (MI.getOpcode() == RISCV::PseudoVID_V_M8) {
+        MachineOperand &VIDDest = MI.getOperand(0);
+        MachineOperand &VIDVL = MI.getOperand(2);
+        MachineInstr *VOR_Orig = nullptr;
+        Register VIDReg = VIDDest.getReg();
+        Register VLReg = VIDVL.getReg();
+        SmallVector<MachineInstr *, 8> Uses;
+        for (MachineInstr &UseMI : MRI->use_instructions(VIDReg)) {
+          if (&UseMI == &MI) continue;
+          if (UseMI.getOpcode() == RISCV::PseudoVOR_VX_M8) {
+            MachineOperand &SrcReg = UseMI.getOperand(2);
+            if (SrcReg.isReg() && SrcReg.getReg() == VIDReg) {
+              LLVM_DEBUG(dbgs() <<"  Imm is VOR: " <<UseMI);
+              VOR_Orig = &UseMI;
+            }
+          } else {
+            LLVM_DEBUG(dbgs() <<"  Use VID result: " <<UseMI);
+            Uses.push_back(&UseMI);
+	  }
+        }
+        MachineInstr *VADD = nullptr;
+        MachineInstr *VOR_ForVADD = nullptr;
+        for (MachineInstr *UseMI : Uses) {
+          MachineOperand &SrcReg = UseMI->getOperand(2);
+          MachineOperand &ImmReg = UseMI->getOperand(3);
+          MachineInstr *ImmDef = MRI->getUniqueVRegDef(ImmReg.getReg());
+          if (ImmDef && ImmDef->getOpcode() == RISCV::ADDI) {
+           int64_t ImmValue = ImmDef->getOperand(2).getImm();
+            LLVM_DEBUG(dbgs() <<"  Imm is: " <<*UseMI);
+            VADD = UseMI;
+            Register VADDDest = VADD->getOperand(0).getReg();
+            for (MachineInstr &UseMI : MRI->use_instructions(VADDDest)) {
+              if (UseMI.getOpcode() == RISCV::PseudoVOR_VX_M8) {
+                MachineOperand &SrcReg = UseMI.getOperand(2);
+                LLVM_DEBUG(dbgs() <<"  Found VOR: " <<UseMI);
+                VOR_ForVADD = &UseMI;
+                break;
+              }
+            }
+            Register VLReg = VIDVL.getReg();
+            Register BaseReg = VOR_Orig->getOperand(0).getReg();
+	    MachineInstr *NewVADD = nullptr;
+	    auto CreateNewVADD = [&](MachineInstr *OldVOR, MachineInstr *OldVADD) -> MachineInstr * {
+              MachineInstrBuilder MIB = BuildMI(MBB, *OldVOR, OldVOR->getDebugLoc(),
+                                                TII->get(RISCV::PseudoVADD_VX_M8));
+              MIB.addReg(OldVOR->getOperand(0).getReg(), RegState::Define);
+              if (OldVOR->getOperand(1).isReg() && OldVOR->getOperand(1).isUndef())
+                MIB.addReg(OldVOR->getOperand(1).getReg(), RegState::Undef);
+              else
+                MIB.addReg(RISCV::NoRegister);
+              MIB.addReg(BaseReg);
+              MIB.addReg(OldVADD->getOperand(3).getReg());
+              MIB.addReg(VLReg);
+              MIB.addImm(5);
+              MIB.addImm(1);
+              MIB.copyImplicitOps(*OldVOR);
+              return MIB;
+            };
+            NewVADD = CreateNewVADD(VOR_ForVADD, VADD);
+            Register VORDest = VOR_ForVADD->getOperand(0).getReg();
+            for (auto &UseMI : MRI->use_instructions(VORDest)) {
+              if (UseMI.getOpcode() == RISCV::PseudoVMSLT_VX_M8) {
+                MachineOperand &SrcReg = UseMI.getOperand(1);
+                if (SrcReg.isReg() && SrcReg.getReg() == VORDest) {
+                  LLVM_DEBUG(dbgs() <<"  Found VMSLT: " <<UseMI);
+	          UseMI.getOperand(1).setReg(NewVADD->getOperand(0).getReg());
+                  break;
+                }
+              }
+            }
+            VOR_ForVADD->eraseFromParent();
+            VADD->eraseFromParent();
+          }
+	}
+        LLVM_DEBUG(dbgs() << "Transformed pattern from A to B\n");
+      }
+    }
+  }
+}
+
 bool ExpandPseudos::runSink(MachineFunction &MF) {
   LLVM_DEBUG(dbgs() << "******** RISCV Sink ********\n");
 
   bool EverMadeChange = false;
 
-  ProcessInSameBlock(MF);
+  if (Sink)
+    ProcessInSameBlock(MF);
+  if (a) {
+    dbgs()<<"RISCV Affine enabled.\n";
+    ProcessInSameAffine(MF);
+  }
 
   for (auto I : RegsToClearKillFlags)
     MRI->clearKillFlags(I);
@@ -367,7 +571,7 @@ bool ExpandPseudos::runSink(MachineFunction &MF) {
 }
 
 bool ExpandPseudos::runOnMachineFunction(MachineFunction &MF) {
-  if (!Sink) {
+  if (!Sink && !a) {
     dbgs()<<"RISCV Sink disabled.\n";
     return false;
   } else {
