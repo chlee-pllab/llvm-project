@@ -90,7 +90,7 @@ private:
     AllSuccsCache &AllSuccessors);
   void ProcessInSameBlock(MachineFunction &MF);
   void ProcessInSameAffine(MachineFunction &MF);
-  bool runSink(MachineFunction &MF);
+  bool runProcess(MachineFunction &MF);
   bool LowerCopy(MachineBasicBlock &MBB, MachineInstr &MI);
 };
 
